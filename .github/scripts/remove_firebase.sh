@@ -17,6 +17,8 @@ for f in app/build.gradle app/build.gradle.kts; do
   sed -i '/firebase-analytics/d' "$f"
   sed -i '/firebase-perf/d' "$f"
   sed -i '/gms\.play-services/d' "$f"
+  # Remove the firebaseCrashlytics{} block (multi-line closure)
+  perl -i -0pe 's/firebaseCrashlytics\s*\{[^}]*\}//g' "$f"
 done
 
 echo "Removing Firebase from source files..."
