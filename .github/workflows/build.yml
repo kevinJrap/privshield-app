@@ -3,16 +3,16 @@ name: Build PrivShield
 on:
   push:
     branches: [ main ]
-  pull_request:
-    branches: [ main ]
   workflow_dispatch:
 
 permissions:
   contents: read
   actions: read
+  security-events: write
 
 jobs:
   build:
+    name: Build PrivShield APK
     runs-on: ubuntu-latest
     timeout-minutes: 45
 
@@ -25,7 +25,6 @@ jobs:
       - name: Clone RethinkDNS source
         run: |
           git clone --depth=1 https://github.com/celzero/rethink-app rethink
-          # Copy only what's needed; don't overwrite your own files
           rsync -a --ignore-existing rethink/ .
           rm -rf rethink
 
@@ -45,16 +44,24 @@ jobs:
       - name: Make gradlew executable
         run: chmod +x gradlew
 
-      - name: Cache Gradle dependencies
+      - name: Restore Gradle cache
         uses: actions/cache@v4
         with:
           path: |
             ~/.gradle/caches
             ~/.gradle/wrapper
             ~/.android/build-cache
-          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
-          restore-keys: |
-            gradle-${{ runner.os }}-
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*','**/gradle-wrapper.properties','**/libs.versions.toml') }}
+          restore-keys: gradle-${{ runner.os }}-
+
+      - name: Remove Firebase
+        run: bash .github/scripts/remove_firebase.sh
+
+      - name: Apply PrivShield patches
+        run: bash .github/scripts/apply_patches.sh
+
+      - name: Harden network security
+        run: bash .github/scripts/harden_nsc.sh
 
       - name: Build debug APK
         run: |
@@ -68,15 +75,20 @@ jobs:
         env:
           GRADLE_OPTS: "-Dorg.gradle.daemon=false"
 
-      - name: Verify APK exists
+      - name: Verify APK is Firebase-clean
         run: |
-          APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -1)
-          if [ -z "$APK_PATH" ]; then
-            echo "ERROR: No APK found after build"
+          APK=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          if [ -z "$APK" ]; then
+            echo "ERROR: No APK found"
             exit 1
           fi
-          echo "APK found: $APK_PATH"
-          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
+          echo "APK size: $(du -sh "$APK" | cut -f1)"
+          unzip -t "$APK" > /dev/null && echo "APK structure valid"
+          if unzip -l "$APK" | grep -q "com/google/firebase"; then
+            echo "ERROR: Firebase still in APK"
+            exit 1
+          fi
+          echo "Firebase-clean confirmed"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -86,7 +98,7 @@ jobs:
           retention-days: 7
           if-no-files-found: error
 
-      - name: Upload build reports on failure
+      - name: Upload logs on failure
         if: failure()
         uses: actions/upload-artifact@v4
         with:
@@ -95,3 +107,20 @@ jobs:
             app/build/reports/
             build/reports/
           retention-days: 3
+```
+
+**Step 9.** Scroll down, click **Commit new file** (green button)
+
+---
+
+## PHASE 4: Create the three script files
+
+These are the actual fix scripts. Same process — click **Add file** → **Create new file** for each one.
+
+---
+
+**Script 1 of 3**
+
+Filename to type:
+```
+.github/scripts/remove_firebase.sh
