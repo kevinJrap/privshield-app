@@ -3,20 +3,30 @@ name: Build PrivShield
 on:
   push:
     branches: [ main ]
+  pull_request:
+    branches: [ main ]
   workflow_dispatch:
+
+permissions:
+  contents: read
+  actions: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 45
 
     steps:
       - name: Checkout PrivShield
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
 
       - name: Clone RethinkDNS source
         run: |
-          git clone https://github.com/celzero/rethink-app rethink
-          cp -r rethink/. .
+          git clone --depth=1 https://github.com/celzero/rethink-app rethink
+          # Copy only what's needed; don't overwrite your own files
+          rsync -a --ignore-existing rethink/ .
           rm -rf rethink
 
       - name: Set up JDK 17
@@ -24,20 +34,64 @@ jobs:
         with:
           java-version: '17'
           distribution: 'temurin'
+          cache: gradle
+
+      - name: Validate Gradle wrapper
+        uses: gradle/actions/wrapper-validation@v4
 
       - name: Setup Android SDK
         uses: android-actions/setup-android@v3
-        env:
-          FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: true
 
       - name: Make gradlew executable
         run: chmod +x gradlew
 
+      - name: Cache Gradle dependencies
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+            ~/.android/build-cache
+          key: gradle-${{ runner.os }}-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties', '**/libs.versions.toml') }}
+          restore-keys: |
+            gradle-${{ runner.os }}-
+
       - name: Build debug APK
-        run: ./gradlew assembleWebDebug
+        run: |
+          ./gradlew assembleWebsiteFullDebug \
+            --no-daemon \
+            --stacktrace \
+            --warning-mode all \
+            -Dorg.gradle.jvmargs="-Xmx4g -XX:+UseG1GC" \
+            -Dorg.gradle.parallel=true \
+            -Dorg.gradle.caching=true
+        env:
+          GRADLE_OPTS: "-Dorg.gradle.daemon=false"
+
+      - name: Verify APK exists
+        run: |
+          APK_PATH=$(find app/build/outputs/apk -name "*.apk" | head -1)
+          if [ -z "$APK_PATH" ]; then
+            echo "ERROR: No APK found after build"
+            exit 1
+          fi
+          echo "APK found: $APK_PATH"
+          echo "APK_PATH=$APK_PATH" >> $GITHUB_ENV
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: PrivShield-debug
-          path: app/build/outputs/apk/web/debug/*.apk
+          name: PrivShield-debug-${{ github.sha }}
+          path: app/build/outputs/apk/websiteFull/debug/*.apk
+          retention-days: 7
+          if-no-files-found: error
+
+      - name: Upload build reports on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-reports-${{ github.sha }}
+          path: |
+            app/build/reports/
+            build/reports/
+          retention-days: 3
